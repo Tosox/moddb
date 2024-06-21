@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import mimetypes
 import os
 import random
 import re
@@ -40,7 +39,7 @@ from .utils import (
 if TYPE_CHECKING:
     from .boxes import Comment, Tag
     from .enums import WatchType
-    from .pages import Engine, Game, Group, Mod, Review, Team
+    from .pages import Addon, Engine, Game, Group, Mod, Review, Team
 
 
 class Message:
@@ -1176,63 +1175,104 @@ class Client:
         """
         return self._vote_tag(tag, 1)
     
-    def upload_addon(self, mod: Mod, filepath: str, thumbnail_filepath: str, category: AddonCategory,
+    def _validate_file(self, path: str, max_mbytes: int, accepted_extensions: List[str]):
+        # Check if is file
+        if not os.path.isfile(path):
+            raise ModdbException("Please select a valid file before uploading")
+        
+        # Check file size
+        file_size = os.path.getsize(path) / 2048 # b -> mb
+        if file_size <= 0:
+            raise ModdbException("Your file cannot be empty")
+        elif file_size > max_mbytes:
+            raise ModdbException(f"Your file must be less then {max_mbytes}mb")
+        
+        # Check file extension
+        file_ext = os.path.splitext(path)[1]
+        if file_ext not in accepted_extensions:
+            raise ModdbException(f"You cannot select a {file_ext} file only ({', '.join(accepted_extensions)})")
+        
+    def _validate_summary(self, text: str):
+        if len(text) < 50 or len(text) > 1000:
+            raise ModdbException("The summary must contain at least 50 and at most 1000 characters")
+    
+    def upload_addon(self, mod: Mod, addon_path: str, thumbnail_path: str, category: AddonCategory,
                      name: str, summary: str, description: str, platforms: List[PlatformCategory],
                      licence: Licence = Licence.proprietary, credits: str = "", tags: List[str] = []):
-        # Do some client-sided checks
-        cwd = os.getcwd()
-        abs_filepath = os.path.join(cwd, filepath)
-        if not os.path.isfile(abs_filepath):
-            raise ModdbException("Please select a file before uploading")
-        
-        # Values copied from ModDB
-        # https://static.moddb.com/html/external/min/index.php?b=cutoff&f=js/jquery.ajaxuploader.js,js/jquery.form.js,js/jquery.multiselects.js&1
-        filesize = os.path.getsize(abs_filepath)
-        if filesize <= 0:
-            raise ModdbException("Your file cannot be empty")
-        elif filesize > (52428800 * 1024):
-            raise ModdbException(f"Your file must be less then {52428800 * 1024}")
-
-        abs_thumbnail_filepath = os.path.join(cwd, thumbnail_filepath)
-
         form = self._request("GET", f"{mod.url}/addons/add")
         html = soup(form.text)
 
+        cwd = os.getcwd()
+        abs_addon_path = os.path.join(cwd, addon_path)
+        abs_thumbnail_path = os.path.join(cwd, thumbnail_path)
+
+        # Do some client-sided checks
+
+        # Validate summary
+        self._validate_summary(summary)
+
+        # Validate add-on file
+        addon_exts = html.find("input", id="downloadsfiledata")["accept"].split(",")
+        self._validate_file(abs_addon_path, 52428800, addon_exts)
+
+        # Validate thumbnail file
+        thumbnail_exts = html.find("input", id="downloadslogo")["accept"].split(",")
+        self._validate_file(abs_thumbnail_path, 8192, thumbnail_exts)
+
+        # Retrieve data for payloads
         formhash = html.find("input", { "name": "formhash" })["value"]
         mod_id = html.find("select", class_="right select").find_all("option")[1]["value"]
 
         addon_file = {
-            "filedata": open(abs_filepath, 'rb')
+            "filedata": open(abs_addon_path, 'rb')
         }
         upload_resp = self._request("POST", f"https://upload.moddb.com/downloads/ajax/upload/{formhash}", files=addon_file)
-        with open(f"{cwd}/resp1.html", 'w+') as f:
-            f.write(upload_resp.text)
         if upload_resp.json()["error"]:
             raise ModdbException("An error occurred while trying to upload the add-on")
 
         logo_file = {
-            "logo": open(abs_thumbnail_filepath, 'rb')
+            "logo": open(abs_thumbnail_path, 'rb')
         }
         data = {
             "formhash": formhash,
             "legacy": 0,
             "platformstemp": 1,
-            "filedataUp": os.path.basename(filepath),
+            "filedataUp": os.path.basename(addon_path),
             "category": category.value,
             "licence": licence.value,
             "credits": credits,
             "tags": ",".join(tags),
             "name": name,
             "summary": summary,
-            "description": description, # Must be html
+            "description": description, # Must be html. Usually text enclosed with p-tag
             "downloads": "Please wait uploading file",
             "links[]": []
         }
         data["links[]"].extend([platform.value for platform in platforms])
         data["links[]"].append(mod_id)
 
-        resp2 = self._request("POST", f"{mod.url}/addons/add", data=data, files=logo_file)
-        print(f"Status code {resp2.status_code}")
-        with open(f"{cwd}/resp2.html", 'w+') as f:
-            f.write(resp2.text)
-        # TODO: check resp
+        post_resp = self._request("POST", f"{mod.url}/addons/add", data=data, files=logo_file)
+
+        # Check if ModDB reports errors
+        post_resp_html = soup(post_resp.text)
+        download_button = post_resp_html.find("a", id="downloadmirrorstoggle")
+        if not download_button:
+            # We are still on the upload form
+            error_tooltip = post_resp_html.find("div", class_="tooltip errortooltip clear")
+            if error_tooltip:
+                if error_tooltip.ul:
+                    error_list = error_tooltip.ul.find_all("li", recursive=False)
+                    errors = "\n".join([f"- {error.text}" for error in error_list])
+                else:
+                    # p-tag contains a space at the beginning and a new line at the end
+                    errors = f"-{error_tooltip.p.text[:-1]}"
+                raise ModdbException(f"Please correct the following: \n{errors}")
+
+    def update_addon(self, addon: Addon):
+        form = self._request("GET", f"{addon.url}/edit")
+        html = soup(form.text)
+
+        if not html.find("input", { "name": "formhash" }):
+            raise ModdbException("You do not have permission to edit the requested downloads content")
+        
+
