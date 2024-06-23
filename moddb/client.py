@@ -6,6 +6,13 @@ import re
 import sys
 from typing import TYPE_CHECKING, Any, List, Tuple, Union
 
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.firefox.service import Service
+import time
+
 import requests
 from bs4 import BeautifulSoup
 from requests import utils
@@ -1195,6 +1202,18 @@ class Client:
     def _validate_summary(self, text: str):
         if len(text) < 50 or len(text) > 1000:
             raise ModdbException("The summary must contain at least 50 and at most 1000 characters")
+
+    def _validate_description(self, text: str):
+        if len(text) < 100 or len(text) > 100000:
+            raise ModdbException("The description must contain at least 100 and at most 100000 characters")
+
+    def normalize_description(self, description: str, editor_url: str):
+        # TODO: implement tinymce checks
+        return description
+
+    def _validate_platforms(self, platforms: List[PlatformCategory]):
+        if len(platforms) == 0:
+            raise ModdbException("Select the platforms the linked mods relate to")
     
     def upload_addon(self, mod: Mod, addon_path: str, thumbnail_path: str, category: AddonCategory,
                      name: str, summary: str, description: str, platforms: List[PlatformCategory],
@@ -1210,6 +1229,15 @@ class Client:
 
         # Validate summary
         self._validate_summary(summary)
+
+        # Validate description
+        self._validate_description(description)
+
+        # Normalize description
+        description = self.normalize_description(description, f"{mod.url}/addons/add")
+
+        # Validate platforms
+        self._validate_platforms(platforms)
 
         # Validate add-on file
         addon_exts = html.find("input", id="downloadsfiledata")["accept"].split(",")
@@ -1237,14 +1265,14 @@ class Client:
             "formhash": formhash,
             "legacy": 0,
             "platformstemp": 1,
-            "filedataUp": os.path.basename(addon_path),
+            "filedataUp": os.path.basename(abs_addon_path),
             "category": category.value,
             "licence": licence.value,
             "credits": credits,
             "tags": ",".join(tags),
             "name": name,
             "summary": summary,
-            "description": description, # Must be html. Usually text enclosed with p-tag
+            "description": description,
             "downloads": "Please wait uploading file",
             "links[]": []
         }
