@@ -6,13 +6,6 @@ import re
 import sys
 from typing import TYPE_CHECKING, Any, List, Tuple, Union
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.firefox.service import Service
-import time
-
 import requests
 from bs4 import BeautifulSoup
 from requests import utils
