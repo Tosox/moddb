@@ -4,7 +4,7 @@ import os
 import random
 import re
 import sys
-from typing import TYPE_CHECKING, Any, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import requests
 from bs4 import BeautifulSoup
@@ -1177,16 +1177,16 @@ class Client:
         """
         return self._vote_tag(tag, 1)
     
-    def _validate_file(self, path: str, max_mbytes: int, accepted_extensions: List[str]):
+    def _validate_file(self, path: str, max_mbytes: float, accepted_extensions: List[str]):
         # Check if is file
         if not os.path.isfile(path):
             raise ModdbException("Please select a valid file before uploading")
         
         # Check file size
-        file_size = os.path.getsize(path) / 2048 # b -> mb
-        if file_size <= 0:
+        file_size_mb = os.path.getsize(path) / (1024 * 1024) # b -> mb
+        if file_size_mb <= 0:
             raise ModdbException("Your file cannot be empty")
-        elif file_size > max_mbytes:
+        elif file_size_mb > max_mbytes:
             raise ModdbException(f"Your file must be less then {max_mbytes}mb")
         
         # Check file extension
@@ -1195,11 +1195,11 @@ class Client:
             raise ModdbException(f"You cannot select a {file_ext} file only ({', '.join(accepted_extensions)})")
         
     def _validate_summary(self, text: str):
-        if len(text) < 50 or len(text) > 1000:
+        if not (50 <= len(text) <= 1000):
             raise ModdbException("The summary must contain at least 50 and at most 1000 characters")
 
     def _validate_description(self, text: str):
-        if len(text) < 100 or len(text) > 100000:
+        if not (100 <= len(text) <= 100000):
             raise ModdbException("The description must contain at least 100 and at most 100000 characters")
 
     def _normalize_description(self, description: str):
@@ -1207,67 +1207,38 @@ class Client:
         return description
 
     def _validate_platforms(self, platforms: List[PlatformCategory]):
-        if len(platforms) == 0:
+        if not platforms:
             raise ModdbException("Select the platforms the linked mods relate to")
         
-    def _validate_post_response(self, response_text: str):
-        post_resp_html = soup(response_text)
-        download_button = post_resp_html.find("a", id="downloadmirrorstoggle")
-        if not download_button:
-            # We are still on the upload form
-            error_tooltip = post_resp_html.find("div", class_="tooltip errortooltip clear")
-            if error_tooltip:
-                if error_tooltip.ul:
-                    error_list = error_tooltip.ul.find_all("li", recursive=False)
-                    errors = "\n".join([f"- {error.text}" for error in error_list])
-                else:
-                    # p-tag contains a space at the beginning and a new line at the end
-                    errors = f"-{error_tooltip.p.text[:-1]}"
-                raise ModdbException(f"Please correct the following: \n{errors}")
-        
-    def _upload_addon_file(self, addon_path: str, url: str):
-        addon_file = {
-            "filedata": open(addon_path, 'rb')
-        }
-        upload_resp = self._request("POST", url, files=addon_file)
-        if upload_resp.json()["error"]:
-            raise ModdbException("An error occurred while trying to upload the add-on")
-        
-    class EditAddonInfo:
-        def __init__(self, category: AddonCategory, name: str, summary: str, description: str, 
-                     platforms: List[PlatformCategory], licence: Licence, credits: str,
-                     url: str, tags: List[str]):
-            self.category = category
-            self.name = name
-            self.summary = summary
-            self.description = description
-            self.platforms = platforms
-            self.licence = licence
-            self.credits = credits
-            self.url = url
-            self.tags = tags
+    def _validate_post_response(self, html_str: str):
+        soup_obj = soup(html_str)
+        if soup_obj.find("a", id="downloadmirrorstoggle"):
+            return  # Upload successful
 
-        def __str__(self):
-            platforms_str = ", ".join([str(platform) for platform in self.platforms])
-            tags_str = ", ".join(self.tags)
-            return (
-                f"EditAddonInfo(\n"
-                f"  Category: {self.category},\n"
-                f"  Name: {self.name},\n"
-                f"  Summary: {self.summary},\n"
-                f"  Description: {self.description},\n"
-                f"  Platforms: {platforms_str},\n"
-                f"  Licence: {self.licence},\n"
-                f"  Credits: {self.credits},\n"
-                f"  URL: {self.url},\n"
-                f"  Tags: {tags_str}\n"
-                f")"
-            )
+        # We are still on the upload form
+        error_tooltip = soup_obj.find("div", class_="tooltip errortooltip clear")
+        if error_tooltip:
+            if error_tooltip.ul:
+                error_list = error_tooltip.ul.find_all("li", recursive=False)
+                errors = "\n".join([f"- {error.text}" for error in error_list])
+            else:
+                # p-tag contains a space at the beginning and a new line at the end
+                errors = f"- {error_tooltip.p.text.strip()}"
+            raise ModdbException(f"Please correct the following: \n{errors}")
         
-    def get_edit_addon_info(self, addon: Addon):
-        form = self._request("GET", f"{addon.url}/edit")
-        html = soup(form.text)
-
+    def _upload_file(self, path: str, url: str):
+        with open(path, 'rb') as f:
+            resp = self._request("POST", url, files={"filedata": f})
+            if resp.json()["error"]:
+                raise ModdbException("An error occurred while trying to upload the add-on")
+            
+    def _prepare_file(self, file_path: str, accepted_exts: List[str], max_size_mb: float):
+        abs_path = os.path.abspath(file_path)
+        self._validate_file(abs_path, max_size_mb, accepted_exts)
+        return abs_path
+        
+    def get_addon_edit_data(self, addon: Addon):
+        html = soup(self._request("GET", f"{addon.url}/edit").text)
         if not html.find("input", { "name": "formhash" }):
             raise ModdbException("You do not have permission to edit the requested downloads content")
         
@@ -1289,41 +1260,26 @@ class Client:
     def upload_addon(self, mod: Mod, addon_path: str, thumbnail_path: str, category: AddonCategory,
                      name: str, summary: str, description: str, platforms: List[PlatformCategory],
                      licence: Licence = Licence.proprietary, credits: str = "", tags: List[str] = []):
-        form = self._request("GET", f"{mod.url}/addons/add")
-        html = soup(form.text)
-
-        cwd = os.getcwd()
-        abs_addon_path = os.path.join(cwd, addon_path)
-        abs_thumbnail_path = os.path.join(cwd, thumbnail_path)
-
-        # Do some client-sided checks
-
-        # Validate summary
-        self._validate_summary(summary)
-
-        # Validate description
-        self._validate_description(description)
-
-        # Normalize description
-        description = self._normalize_description(description)
-
-        # Validate platforms
-        self._validate_platforms(platforms)
-
-        # Validate add-on file
-        addon_exts = html.find("input", id="downloadsfiledata")["accept"].split(",")
-        self._validate_file(abs_addon_path, 52428800, addon_exts)
-
-        # Validate thumbnail file
-        thumbnail_exts = html.find("input", id="downloadslogo")["accept"].split(",")
-        self._validate_file(abs_thumbnail_path, 8192, thumbnail_exts)
+        html = soup(self._request("GET", f"{mod.url}/addons/add").text)
 
         # Retrieve data for payloads
         formhash = html.find("input", { "name": "formhash" })["value"]
         mod_id = html.find("select", class_="right select").find_all("option")[1]["value"]
 
+        # Validations
+        self._validate_summary(summary)
+        self._validate_description(description)
+        self._validate_platforms(platforms)
+        description = self._normalize_description(description)
+
+        # Files
+        addon_exts = html.find("input", id="downloadsfiledata")["accept"].split(",")
+        thumbnail_exts = html.find("input", id="downloadslogo")["accept"].split(",")
+        abs_addon_path = self._prepare_file(addon_path, addon_exts, 52428800 / 1024)
+        abs_thumbnail_path = self._prepare_file(thumbnail_path, thumbnail_exts, 8192 / 1024)
+
         # Upload addon file
-        self._upload_addon_file(abs_addon_path, f"https://upload.moddb.com/downloads/ajax/upload/{formhash}")
+        self._upload_file(abs_addon_path, f"https://upload.moddb.com/downloads/ajax/upload/{formhash}")
 
         logo_file = {
             "logo": open(abs_thumbnail_path, 'rb')
@@ -1341,83 +1297,104 @@ class Client:
             "summary": summary,
             "description": description,
             "downloads": "Please wait uploading file",
-            "links[]": []
+            "links[]": [*map(lambda p: p.value, platforms), mod_id]
         }
-        data["links[]"].extend([platform.value for platform in platforms])
-        data["links[]"].append(mod_id)
 
-        post_resp = self._request("POST", f"{mod.url}/addons/add", data=data, files=logo_file)
+        resp = self._request("POST", f"{mod.url}/addons/add", data=data, files=logo_file)
+        self._validate_post_response(resp.text)
+        if logo_file["logo"]:
+            logo_file["logo"].close()
 
-        # Check if ModDB reports error
-        self._validate_post_response(post_resp.text)       
-
-    def update_addon(self, addon: Addon, addon_path: str = None, thumbnail_path: str = None, category: AddonCategory = None,
-                     name: str = None, summary: str = None, description: str = None, platforms: List[PlatformCategory] = None,
-                     licence: Licence = None, credits: str = None, tags: List[str] = None, url: str = None):
-        form = self._request("GET", f"{addon.url}/edit")
-        html = soup(form.text)
-
+    def update_addon(self, addon: Addon, addon_path: Optional[str] = None, thumbnail_path: Optional[str] = None,
+                     category: Optional[AddonCategory] = None, name: Optional[str] = None, summary: Optional[str] = None,
+                     description: Optional[str] = None, platforms: Optional[List[PlatformCategory]] = None,
+                     licence: Optional[Licence] = None, credits: Optional[str] = None, tags: Optional[List[str]] = None,
+                     url: Optional[str] = None):
+        html = soup(self._request("GET", f"{addon.url}/edit").text)
         if not html.find("input", { "name": "formhash" }):
             raise ModdbException("You do not have permission to edit the requested downloads content")
         
-        cwd = os.getcwd()
-        addon_infos = self.get_edit_addon_info(addon)
-
-        if summary:
-            self._validate_summary(summary)
-
-        if description:
-            self._validate_description(description)
-            description = self._normalize_description(description)
-
-        if platforms:
-            self._validate_platforms(platforms)
-
         # Retrieve data for payloads
         formhash = html.find("input", { "name": "formhash" })["value"]
         mod_id = html.find("select", class_="right select").find_all("option")[1]["value"]
+        addon_data = self.get_addon_edit_data(addon)
 
+        # Use existing values if not overridden
+        summary = summary or addon_data.summary
+        description = self._normalize_description(description or addon_data.description)
+        name = name or addon_data.name
+        url = url or addon_data.url
+        credits = credits or addon_data.credits
+        tags = tags or addon_data.tags
+        platforms = platforms or addon_data.platforms
+        category = category or addon_data.category
+        licence = licence or addon_data.licence
+
+        self._validate_summary(summary)
+        self._validate_description(description)
+        self._validate_platforms(platforms)
+
+        abs_addon_path = None
         if addon_path:
-            # Validate add-on file
-            abs_addon_path = os.path.join(cwd, addon_path)
             addon_exts = html.find("input", id="downloadsfiledata")["accept"].split(",")
-            self._validate_file(abs_addon_path, 52428800, addon_exts)
+            abs_addon_path = self._prepare_file(addon_path, addon_exts, 52428800 / 1024)
+            self._upload_file(abs_addon_path, f"https://upload.moddb.com/downloads/ajax/upload/{formhash}")
 
-            # Upload file
-            self._upload_addon_file(abs_addon_path, f"https://upload.moddb.com/downloads/ajax/upload/{formhash}")
-
+        abs_thumbnail_path = None
         if thumbnail_path:
-            # Validate thumbnail file
-            abs_thumbnail_path = os.path.join(cwd, thumbnail_path)
             thumbnail_exts = html.find("input", id="downloadslogo")["accept"].split(",")
-            self._validate_file(abs_thumbnail_path, 8192, thumbnail_exts)
+            abs_thumbnail_path = self._prepare_file(thumbnail_path, thumbnail_exts, 8192 / 1024)
 
         logo_file = {
-            "logo": open(abs_thumbnail_path, 'rb') if thumbnail_path else None
+            "logo": open(abs_thumbnail_path, 'rb') if abs_addon_path else None
         }
         data = {
             "formhash": formhash,
             "legacy": 0,
             "platformstemp": 1,
-            "filedataUp": os.path.basename(abs_addon_path) if addon_path else None,
-            "category": category.value if category else addon_infos.category.value,
-            "licence": licence.value if licence else addon_infos.licence.value,
-            "credit": credits if credits else addon_infos.credits,
-            "tags": ",".join(tags) if tags else addon_infos.tags,
-            "nameid": url if url else addon_infos.url,
-            "name": name if name else addon_infos.name,
-            "summary": summary if summary else addon_infos.summary,
-            "description": description if description else addon_infos.description,
+            "filedataUp": os.path.basename(abs_addon_path) if abs_addon_path else None,
+            "category": category.value,
+            "licence": licence.value,
+            "credit": credits,
+            "tags": ",".join(tags),
+            "nameid": url,
+            "name": name,
+            "summary": summary,
+            "description": description,
             "downloads": "Please wait uploading file",
-            "links[]": []
+            "links[]": [*map(lambda p: p.value, platforms), mod_id]
         }
-        if platforms:
-            data["links[]"].extend([platform.value for platform in platforms])
-        else:
-            data["links[]"].extend([platform.value for platform in addon_infos.platforms])
-        data["links[]"].append(mod_id)
 
-        post_resp = self._request("POST", f"{addon.url}/edit", data=data, files=logo_file)
+        resp = self._request("POST", f"{addon.url}/edit", data=data, files=logo_file)
+        self._validate_post_response(resp.text)
+        if logo_file["logo"]:
+            logo_file["logo"].close()
 
-        # Check if ModDB reports error
-        self._validate_post_response(post_resp.text)
+    class EditAddonInfo:
+        def __init__(self, category: AddonCategory, name: str, summary: str, description: str, 
+                     platforms: List[PlatformCategory], licence: Licence, credits: str,
+                     url: str, tags: List[str]):
+            self.category = category
+            self.name = name
+            self.summary = summary
+            self.description = description
+            self.platforms = platforms
+            self.licence = licence
+            self.credits = credits
+            self.url = url
+            self.tags = tags
+
+        def __str__(self):
+            return (
+                f"EditAddonInfo(\n"
+                f"  Category: {self.category},\n"
+                f"  Name: {self.name},\n"
+                f"  Summary: {self.summary},\n"
+                f"  Description: {self.description},\n"
+                f"  Platforms: {', '.join(map(str, self.platforms))},\n"
+                f"  Licence: {self.licence},\n"
+                f"  Credits: {self.credits},\n"
+                f"  URL: {self.url},\n"
+                f"  Tags: {', '.join(self.tags)}\n"
+                f")"
+            )
